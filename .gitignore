@@ -1,0 +1,6 @@
+.DS_Store
+node_modules/
+# Rapporten uit de verkenner bevatten je eigen gezondheidsdata en horen niet in een publieke repo.
+kadans-*.json
+# Deze test vergelijkt met je eigen proefsync en bevat dus ook eigen meetwaarden.
+tests/parse-lokaal.mjs
