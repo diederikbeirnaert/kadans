@@ -214,7 +214,7 @@ export function today({ activities, days, meta }, actions) {
       ytd.now.zwemmen || ytd.before.zwemmen ? yearStat('Gezwommen', ytd.now.zwemmen, ytd.before.zwemmen, 'km', 1) : null),
     el('p', { className: 'muted small', textContent: `Vergeleken met ${ytd.year - 1} tot en met dezelfde dag.` }));
 
-  const upcoming = nextMilestones(activities).slice(0, 3);
+  const upcoming = nextMilestones(activities, goal).slice(0, 3);
   const milestoneCard = upcoming.length ? card('Volgende mijlpalen', upcoming.map(milestoneBar), el('a', { className: 'link', href: '#progressie', textContent: 'Alle mijlpalen' })) : null;
 
   const lastActs = [...activities].sort((a, b) => b.start - a.start).slice(0, 5);
@@ -223,9 +223,9 @@ export function today({ activities, days, meta }, actions) {
 }
 
 // Per soort mijlpaal de eerstvolgende, dichtst bij het doel eerst.
-function nextMilestones(activities) {
-  const open = st.milestones(activities).filter((m) => !m.date && m.target);
-  return [...new Map(open.reverse().map((m) => [m.unit + m.title.replace(/^[\d.]+ /, ''), m])).values()].sort((a, b) => b.done / b.target - a.done / a.target);
+function nextMilestones(activities, goal) {
+  const open = st.milestones(activities, goal).filter((m) => !m.date && m.target);
+  return [...new Map(open.reverse().map((m) => [m.group, m])).values()].sort((a, b) => b.done / b.target - a.done / a.target);
 }
 const milestoneBar = (m) => el('div', { className: 'goalbar' },
   el('div', {}, el('strong', { textContent: m.title }), el('span', { className: 'muted', textContent: `nog ${nf(Math.ceil(m.target - m.done))} ${m.unit}` })),
@@ -468,6 +468,82 @@ export function health({ days, meta }, actions) {
 // De tijden die bij een prestatie-index horen, als leesbare zin.
 const equivalents = (v) => [['5 km', 5000], ['10 km', 10000], ['een halve marathon', 21097.5]].map(([label, d]) => `${label} in ${clock(nm.timeForVdot(v, d))}`).join(', ');
 
+// Hoe zwaar een soort sessie weegt tegenover je gemiddelde training: rustig werk levert per minuut minder belasting op dan intervallen.
+const KIND_WEIGHT = { easy: 0.85, long: 0.85, strides: 1, tempo: 1.2, interval: 1.3, race: 1.4 };
+
+// Vooruitblik: je fitheid doorgerekend langs je trainingsschema, met je eigen belasting per minuut.
+function outlookCard({ activities, meta }, vo2) {
+  const now = st.isoDate();
+  const rate = st.loadPerMinute(activities);
+  const history = st.loadSeries(activities, 5000);
+  const cur = history.at(-1);
+  if (!rate || !cur) return null;
+  const goal = meta.weekGoal || 3;
+  const fromPlan = !!meta.plan;
+  // Zonder schema: je weekdoel aan 30 minuten per sessie, gelijk verdeeld over de week.
+  const pattern = st.spread(goal), dow = (new Date(now + 'T12:00:00').getDay() + 6) % 7;
+  const sessions = fromPlan
+    ? meta.plan.weeks.flatMap((w) => w.sessions).filter((x) => x.date >= now && pl.status(x, activities) !== 'gedaan')
+    : Array.from({ length: 42 }, (_, i) => i).filter((i) => pattern[(dow + i + 1) % 7]).map((i) => ({ date: st.addDays(now, i + 1), minutes: 30, kind: 'easy', title: 'Sessie van 30 minuten' }));
+  const lastDate = sessions.at(-1)?.date || now;
+  const horizon = Math.max(28, Math.min(84, Math.round((Date.parse(lastDate) - Date.parse(now)) / st.DAY)));
+  const future = Array.from({ length: horizon }, (_, i) => st.addDays(now, i + 1));
+  const inRange = sessions.filter((x) => x.date <= future.at(-1));
+  const loadOf = (x) => (x.kind === 'race' ? rate * 60 * KIND_WEIGHT.race : x.minutes * rate * (KIND_WEIGHT[x.kind] || 1));
+  const perDay = (list) => { const m = new Map(); for (const x of list) m.set(x.date, (m.get(x.date) || 0) + loadOf(x)); return m; };
+  const run = (list, startToday) => { const m = perDay(list); return st.projectFitness(startToday ? st.projectFitness(cur, [m.get(now) || 0]).at(-1) : cur, future.map((d) => m.get(d) || 0)); };
+  // Vandaag zit al in de huidige stand; een sessie van vandaag die nog moet gebeuren tellen we er eerst bij.
+  const todays = inRange.filter((x) => x.date === now);
+  const full = run(inRange, todays.length > 0);
+  const partial = run(inRange.filter((_, i) => i % 3 !== 2), todays.length > 0);
+  const idle = st.projectFitness(cur, future.map(() => 0));
+
+  const next = inRange[0];
+  const gain = next ? loadOf(next) / 42 : null;
+  const end = full.at(-1).fitness, pct = cur.fitness > 0 ? (end - cur.fitness) / cur.fitness * 100 : null;
+  const peak = Math.max(...full.map((p) => p.fitness)), peakAt = future[full.findIndex((p) => p.fitness === peak)];
+  const lastTime = history.slice(0, -7).findLast((p) => p.fitness >= peak);
+  const best180 = Math.max(...history.slice(-180).map((p) => p.fitness));
+  const passes = full.findIndex((p) => p.fitness > best180);
+  const minutes = inRange.reduce((t, x) => t + x.minutes, 0);
+  const longest = Math.max(0, ...inRange.map((x) => x.minutes));
+  const weeksCount = Math.ceil(horizon / 7);
+  const stop = idle.at(-1).fitness, rising = end > cur.fitness + 1;
+  const low = full.reduce((m, p, i) => (p.fitness < full[m].fitness ? i : m), 0);   // het dal: vanaf hier stijgt je fitheid weer
+  const past = history.slice(-28);
+  const pad = (arr) => [...past.map((p, i) => (i === past.length - 1 ? p.fitness : null)), ...arr.map((p) => p.fitness)];
+  const until = fromPlan && meta.goal.kind === 'race' && meta.goal.date <= future.at(-1) ? `tot je ${pl.goalLabel(meta.goal).toLowerCase()} op ${shortDay(meta.goal.date)}` : `de komende ${weeksCount} weken`;
+  const step = Math.ceil((past.length + horizon) / 6);
+
+  return card('Vooruitblik',
+    el('p', { className: 'muted' }, fromPlan
+      ? `Waar je schema voor ${pl.goalLabel(meta.goal).toLowerCase()} je brengt, doorgerekend met je eigen belasting per minuut. Rustige sessies tellen lichter dan tempo en intervallen.`
+      : ['Nog geen schema: dit rekent met je weekdoel aan 30 minuten per sessie. ', el('a', { href: '#schema', textContent: 'Kies een doel' }), ' voor een vooruitblik op maat.']),
+    el('div', { className: 'figures' },
+      next ? figure({ label: `Je volgende sessie: ${next.title.toLowerCase()}`, value: `+${nf(gain, 1)}`, band: { label: 'Fitheid stijgt', tone: 'good' },
+        note: `${next.date === now ? 'Vandaag' : longDay(next.date)}${next.minutes ? `, ${next.minutes} minuten` : ''}. Elke dag zonder training zakt je fitheid met ongeveer ${nf(cur.fitness / 42, 1)}; deze sessie maakt ${nf(gain / (cur.fitness / 42 || 1), 1)} van zulke dagen goed.` }) : null,
+      figure({ label: `${fromPlan ? 'Je schema volgen' : `${goal}× 30 minuten per week`}, ${until}`, value: nf(end),
+        band: end > cur.fitness + 1 ? { label: 'Opbouw', tone: 'good' } : end >= cur.fitness * 0.85 ? { label: 'Behoud', tone: 'good' } : { label: 'Zakt, maar veel minder dan bij stoppen', tone: 'fair' },
+        note: `${pct != null ? `${pct >= 0 ? '+' : '−'}${nf(Math.abs(pct))}% tegenover nu (${nf(cur.fitness)}), en ${nf(end - stop)} punten meer dan wanneer je stopt. ` : ''}${rising
+          ? (lastTime ? `Zo fit was je voor het laatst op ${fullDay(lastTime.date)}.` : 'Zo fit was je nog nooit volgens je data.')
+          : 'Je fitheid telt nu nog een recente drukke periode mee. Het schema start bewust rustig en bouwt daarna op.'}${rising && peak > end + 1 && peakAt > st.addDays(now, 14) ? ` Je piek van ${nf(peak)} valt rond ${shortDay(peakAt)}, vlak voor de afbouw.` : ''}` }),
+      figure({ label: 'Als je 2 van de 3 sessies haalt', value: nf(partial.at(-1).fitness), band: partial.at(-1).fitness > cur.fitness + 1 ? { label: 'Nog altijd opbouw', tone: 'good' } : { label: 'Het meeste blijft overeind', tone: 'good' },
+        note: `Een gemiste sessie is geen ramp: je houdt ${nf((partial.at(-1).fitness - stop) / Math.max(0.1, end - stop) * 100)}% van het effect van je schema over. Regelmaat telt meer dan perfectie.` }),
+      figure({ label: 'Als je stopt', value: nf(stop), band: { label: 'Verlies', tone: 'poor' },
+        note: `Na ${weeksCount} weken blijft ${nf(stop / (cur.fitness || 1) * 100)}% van je fitheid over. Na ongeveer 4 weken stilzitten is de helft weg.` })),
+    chart({ title: 'Vooruitblik op je fitheid', labels: [...past.map((p) => longDay(p.date)), ...future.map(longDay)], tick: (i) => (i % step === Math.floor(step / 2) ? shortDay(i < past.length ? past[i].date : future[i - past.length]) : ''), zero: true,
+      lines: [{ values: [...past.map((p) => p.fitness), ...future.map(() => null)], color: '#0b0b0b', label: 'Tot nu' }, { values: pad(idle), color: '#898781', label: 'Stoppen' },
+        { values: pad(partial), color: C.vermoeidheid, label: '2 van de 3 sessies' }, { values: pad(full), color: C.fitheid, label: fromPlan ? 'Je schema' : `${goal}× 30 min per week` }], fmt: (v) => nf(v, 1), tickFmt: (v) => nf(v) }),
+    el('div', { className: 'figures' },
+      figure({ label: 'Wat je dan gedaan hebt', value: `${inRange.length}`, unit: inRange.length === 1 ? 'sessie' : 'sessies', note: `Samen ${hours(minutes / 60)} training in ${weeksCount} weken, met een langste sessie van ${longest} minuten.` }),
+      figure({ label: 'Je reeks', value: `${weeksCount}`, unit: 'weken op rij', note: `Haal je elke week je doel, dan staat je reeks op ${weeksCount} weken. Je langste ooit is ${st.streak(st.weeks(activities), goal).best}.` }),
+      !rising && low > 0 && low < full.length - 7 && end > full[low].fitness + 0.5 ? figure({ label: 'Het keerpunt', value: shortDay(future[low]), band: { label: 'Vanaf dan stijgt je fitheid', tone: 'good' },
+        note: `Tot dan weegt je recente drukke periode nog door. Daarna wint het schema: van ${nf(full[low].fitness)} naar ${nf(end)}.` }) : null,
+      passes >= 0 ? figure({ label: 'Fitter dan in het laatste halfjaar', value: shortDay(future[passes]), band: { label: 'Binnen bereik', tone: 'top' }, note: `Rond die dag passeer je ${nf(best180)}, je hoogste fitheid van de laatste 6 maanden.` })
+        : figure({ label: 'Je hoogste fitheid van het laatste halfjaar', value: nf(best180), note: `Dit schema brengt je tot ${nf(Math.max(end, rising ? peak : end))}. ${best180 - peak > 1 ? 'Dat verschil haal je in met meer sessies per week of een langer schema; forceren heeft geen zin.' : 'Daar zit je dan weer vlakbij.'}` })),
+    vo2.value != null ? el('p', { className: 'muted small', textContent: `Je VO2max voorspellen kan niet per persoon. Uit onderzoek: wie 3 keer per week traint, wint in 8 tot 12 weken doorgaans 5 tot 15%; voor jou zou dat ${nf(vo2.value * 1.05)} tot ${nf(vo2.value * 1.15)} zijn. Wie minder getraind is, wint het snelst.` }) : null);
+}
+
 export function progress({ activities, meta }, actions) {
   if (!activities.length) return el('div', { className: 'view' }, head('Progressie'), card(null, empty('Nog geen activiteiten.')));
   const z = zonesOf(meta);
@@ -510,43 +586,8 @@ export function progress({ activities, meta }, actions) {
     pSeen.length ? chart({ title: 'Tempo bij vaste hartslag', labels: paces.map((m) => `${monthName(m.month)} · ${m.n} lopen`), tick: (i) => (i % mStep === mStep - 1 ? monthName(paces[i].month) : ''), invert: true,
       lines: [{ values: paces.map((m) => m.v), color: C.lopen, label: `Tempo bij ${refHr} slagen` }], fmt: (v) => `${clock(v)} /km`, tickFmt: (v) => clock(v) }) : empty('Nog te weinig lopen om een verloop te tonen.'));
 
-  // Vooruitblik: fitheid doorgerekend voor drie scenario's, met jouw eigen gemiddelde belasting per minuut.
-  const rate = st.loadPerMinute(activities);
-  const history = st.loadSeries(activities, 5000);
-  const cur = history.at(-1);
   const goal = meta.weekGoal || 3;
-  let outlook = null;
-  if (rate && cur) {
-    const HORIZON = 42, one = rate * 30;
-    const pattern = st.spread(goal), dow = (new Date(now + 'T12:00:00').getDay() + 6) % 7;
-    const planned = new Map((meta.plan?.weeks || []).flatMap((w) => w.sessions).map((x) => [x.date, x.minutes]));
-    const future = Array.from({ length: HORIZON }, (_, i) => st.addDays(now, i + 1));
-    const idle = st.projectFitness(cur, future.map(() => 0));
-    const steady = st.projectFitness(cur, future.map((_, i) => (pattern[(dow + i + 1) % 7] ? one : 0)));
-    const plan = planned.size ? st.projectFitness(cur, future.map((d) => (planned.get(d) || 0) * rate)) : null;
-    const after = st.projectFitness(cur, [one])[0];
-    const target = steady.at(-1).fitness;
-    const lastTime = history.slice(0, -7).findLast((p) => p.fitness >= target);
-    const past = history.slice(-28);
-    const labels = [...past.map((p) => longDay(p.date)), ...future.map(longDay)];
-    const pad = (arr) => [...past.map((p, i) => (i === past.length - 1 ? p.fitness : null)), ...arr.map((p) => p.fitness)];
-    const pct = cur.fitness > 0 ? (target - cur.fitness) / cur.fitness * 100 : null;
-    outlook = card('Vooruitblik',
-      el('p', { className: 'muted', textContent: `Wat training met je fitheid doet, doorgerekend met je eigen gemiddelde: ${nf(one)} belastingspunten per 30 minuten.` }),
-      el('div', { className: 'figures' },
-        figure({ label: 'Eén sessie van 30 minuten vandaag', value: `+${nf(after.fitness - cur.fitness, 1)}`, band: { label: 'Fitheid stijgt', tone: 'good' },
-          note: `Je fitheid gaat van ${nf(cur.fitness, 1)} naar ${nf(after.fitness, 1)}. Zonder training zakt ze morgen naar ${nf(idle[0].fitness, 1)}: elke rustdag kost ongeveer ${nf(cur.fitness / 42, 1)} punt.` }),
-        figure({ label: `${goal}× 30 minuten per week, 6 weken lang`, value: nf(target), band: target > cur.fitness + 1 ? { label: 'Opbouw', tone: 'good' } : target < cur.fitness - 1 ? { label: 'Niet genoeg om te houden wat je hebt', tone: 'fair' } : { label: 'Behoud', tone: 'good' },
-          note: `${pct != null ? `${pct >= 0 ? '+' : '−'}${nf(Math.abs(pct))}% tegenover nu (${nf(cur.fitness)}). ` : ''}${lastTime ? `Dat niveau had je voor het laatst op ${fullDay(lastTime.date)}.` : 'Zo hoog stond je fitheid nog nooit.'}` }),
-        figure({ label: '6 weken niets doen', value: nf(idle.at(-1).fitness), band: { label: 'Verlies', tone: 'poor' },
-          note: `Je verliest ${nf(cur.fitness - idle.at(-1).fitness)} van je ${nf(cur.fitness)} punten. Na ongeveer 4 weken stilzitten is de helft van je fitheid weg.` }),
-        plan ? figure({ label: 'Je schema volgen, 6 weken lang', value: nf(plan.at(-1).fitness), band: plan.at(-1).fitness > cur.fitness + 1 ? { label: 'Opbouw', tone: 'good' } : { label: 'Behoud', tone: 'good' },
-          note: `Met de minuten uit je schema voor ${pl.goalLabel(meta.goal).toLowerCase()}.` }) : null),
-      chart({ title: 'Vooruitblik op je fitheid', labels, tick: (i) => (i % 14 === 6 ? shortDay(i < past.length ? past[i].date : future[i - past.length]) : ''), zero: true,
-        lines: [{ values: [...past.map((p) => p.fitness), ...future.map(() => null)], color: '#0b0b0b', label: 'Tot nu' }, { values: pad(idle), color: '#898781', label: 'Niets doen' },
-          { values: pad(steady), color: C.fitheid, label: `${goal}× 30 min per week` }, ...(plan ? [{ values: pad(plan), color: C.vermoeidheid, label: 'Je schema' }] : [])], fmt: (v) => nf(v, 1), tickFmt: (v) => nf(v) }),
-      vo2.value != null ? el('p', { className: 'muted small', textContent: `Je VO2max voorspellen kan niet per persoon. Uit onderzoek: wie 3 keer per week traint, wint in 8 tot 12 weken doorgaans 5 tot 15%; voor jou zou dat ${nf(vo2.value * 1.05)} tot ${nf(vo2.value * 1.15)} zijn. Wie minder getraind is, wint het snelst.` }) : null);
-  }
+  const outlook = outlookCard({ activities, meta }, vo2);
 
   // Dit jaar tegenover vorig jaar, regelmaat en verdeling over de sporten.
   const ytd = st.yearToDate(activities);
@@ -607,12 +648,12 @@ export function progress({ activities, meta }, actions) {
     el('div', { className: 'figures' }, far.map(([label, a]) => el('a', { className: 'figure', href: `#activiteit/${a.id}` }, el('div', { className: 'tile-label', textContent: label }), el('div', { className: 'tile-value', textContent: distance(a) }), el('div', { className: 'tile-note', textContent: `${fullDay(a.date)} · ${clock(a.durationS)}` }))),
       climb ? el('a', { className: 'figure', href: `#activiteit/${climb.id}` }, el('div', { className: 'tile-label', textContent: 'Meeste hoogtemeters op de fiets' }), el('div', { className: 'tile-value', textContent: `${nf(climb.detail.elevGain)} m` }), el('div', { className: 'tile-note', textContent: `${fullDay(climb.date)} · ${distance(climb)}` })) : null));
 
-  const ms = st.milestones(activities);
+  const ms = st.milestones(activities, goal);
   const earned = ms.filter((m) => m.date).sort((a, b) => b.date.localeCompare(a.date));
   const milestones = card('Mijlpalen',
     el('div', { className: 'donut-block' },
       donut([{ value: earned.length, color: '#ff375f', label: 'Behaald' }, { value: ms.length - earned.length, color: '#e5e5ea', label: 'Nog te halen' }], [el('strong', { textContent: `${earned.length}/${ms.length}` }), el('span', { textContent: 'behaald' })], 112, 16),
-      el('div', { className: 'goalbars' }, nextMilestones(activities).slice(0, 4).map(milestoneBar))),
+      el('div', { className: 'goalbars' }, nextMilestones(activities, goal).slice(0, 6).map(milestoneBar))),
     el('details', { className: 'fold' }, el('summary', {}, el('strong', { textContent: 'Behaalde mijlpalen' }), el('span', { className: 'muted', textContent: earned.length ? `laatste: ${earned[0].title}` : 'nog geen' })),
       el('div', { className: 'badges' }, earned.map((m) => el('div', { className: 'medal on' }, el('strong', { textContent: m.title }), el('span', { textContent: fullDay(m.date) }))))));
 

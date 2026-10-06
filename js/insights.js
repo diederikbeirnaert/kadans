@@ -44,7 +44,7 @@ export function insights({ activities, days, meta }, max = 5, today = st.isoDate
     .flatMap(([sport, dist]) => ph.efforts(activities, sport, dist).filter((e) => e.date >= since).map((e) => ({ ...e, sport })));
   if (fresh.length) add('top', `Nieuw record bij het ${fresh[0].sport}: ${fresh[0].label} in ${clock(fresh[0].timeS)}${fresh.length > 1 ? `, en nog ${fresh.length - 1} ${fresh.length === 2 ? 'ander record' : 'andere records'}` : ''}.`, '#progressie');
 
-  const near = st.milestones(activities).filter((m) => !m.date && m.target && m.done / m.target >= 0.85).sort((a, b) => b.done / b.target - a.done / a.target)[0];
+  const near = st.milestones(activities, goal).filter((m) => !m.date && m.target && m.done / m.target >= 0.85).sort((a, b) => b.done / b.target - a.done / a.target)[0];
   if (near) add('good', `Nog ${Math.ceil(near.target - near.done).toLocaleString('nl-BE')} ${near.unit} tot de mijlpaal "${near.title}".`, '#progressie');
 
   const loggedLately = days.some((d) => d.food && d.date >= st.addDays(today, -7) && d.date < today);

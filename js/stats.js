@@ -141,34 +141,66 @@ export function bedtimeSpread(days, n = 14, today = isoDate()) {
 }
 
 // Mijlpalen: wat je al bereikte en wat de volgende is. Elke mijlpaal heeft een datum zodra ze gehaald is.
-export function milestones(activities) {
+// Mijlpalen met een teller hebben `done`, `target`, `unit` en een `group` (per groep is er telkens één eerstvolgende).
+export function milestones(activities, goal = 3) {
   const sorted = activities.filter(isSession).sort((a, b) => a.date.localeCompare(b.date));
   const out = [];
-  const single = (title, test) => {
-    const hit = sorted.find(test);
-    out.push({ title, date: hit?.date || null });
-  };
-  const total = (title, sport, km) => {
+  const nl = (n) => n.toLocaleString('nl-BE');
+  const single = (title, test) => out.push({ title, date: sorted.find(test)?.date || null });
+  // `amount(a)` is wat één activiteit bijdraagt; `filter` beperkt tot een sport.
+  const total = (title, group, unit, target, amount, filter = () => true) => {
     let sum = 0, date = null;
     for (const a of sorted) {
-      if (sport && a.sport !== sport) continue;
-      sum += sport ? (a.distanceM || 0) / 1000 : 1;
-      if (sum >= km) { date = a.date; break; }
+      if (!filter(a)) continue;
+      sum += amount(a);
+      if (sum >= target) { date = a.date; break; }
     }
-    out.push({ title, date, done: sum, target: km, unit: sport ? 'km' : 'sessies', progress: date ? null : `${Math.round(sum).toLocaleString('nl-BE')} van ${km.toLocaleString('nl-BE')}${sport ? ' km' : ''}` });
+    out.push({ title, date, group, unit, done: sum, target, progress: date ? null : `${nl(Math.round(sum))} van ${nl(target)} ${unit}` });
   };
-  single('Eerste 5 km gelopen', (a) => a.sport === 'lopen' && a.distanceM >= 5000);
-  single('Eerste 10 km gelopen', (a) => a.sport === 'lopen' && a.distanceM >= 10000);
-  single('Eerste halve marathon', (a) => a.sport === 'lopen' && a.distanceM >= 21097);
-  single('Eerste marathon', (a) => a.sport === 'lopen' && a.distanceM >= 42195);
-  single('Eerste rit van 50 km', (a) => a.sport === 'fietsen' && a.distanceM >= 50000);
-  single('Eerste rit van 100 km', (a) => a.sport === 'fietsen' && a.distanceM >= 100000);
-  single('Eerste kilometer gezwommen', (a) => a.sport === 'zwemmen' && a.distanceM >= 1000);
-  single('Eerste triatlon', (a) => a.sport === 'triatlon');
-  for (const km of [100, 500, 1000, 2500]) total(`${km.toLocaleString('nl-BE')} km gelopen`, 'lopen', km);
-  for (const km of [1000, 5000, 10000]) total(`${km.toLocaleString('nl-BE')} km gefietst`, 'fietsen', km);
-  for (const km of [10, 50, 100]) total(`${km} km gezwommen`, 'zwemmen', km);
-  for (const n of [50, 100, 250, 500, 1000]) total(`${n.toLocaleString('nl-BE')} sessies`, null, n);
+  const km = (a) => (a.distanceM || 0) / 1000;
+  const is = (sport) => (a) => a.sport === sport;
+  const far = (sport, m) => (a) => a.sport === sport && a.distanceM >= m;
+  const long = (sport, h) => (a) => a.sport === sport && a.durationS >= h * 3600;
+  const tri = (min, max) => (a) => a.sport === 'triatlon' && a.distanceM >= min * 1000 && a.distanceM <= max * 1000;
+
+  single('Eerste 5 km gelopen', far('lopen', 5000));
+  single('Eerste 10 km gelopen', far('lopen', 10000));
+  single('Eerste 15 km gelopen', far('lopen', 15000));
+  single('Eerste halve marathon', far('lopen', 21097));
+  single('Eerste 30 km gelopen', far('lopen', 30000));
+  single('Eerste marathon', far('lopen', 42195));
+  single('Eerste loop van een uur', long('lopen', 1));
+  single('Eerste loop van twee uur', long('lopen', 2));
+  single('Eerste rit van 50 km', far('fietsen', 50000));
+  single('Eerste rit van 100 km', far('fietsen', 100000));
+  single('Eerste rit van 150 km', far('fietsen', 150000));
+  single('Eerste rit van 200 km', far('fietsen', 200000));
+  single('Eerste rit van drie uur', long('fietsen', 3));
+  single('Eerste kilometer gezwommen', far('zwemmen', 1000));
+  single('Eerste 2 km gezwommen', far('zwemmen', 2000));
+  single('Eerste 3,8 km gezwommen', far('zwemmen', 3800));
+  single('Eerste triatlon', is('triatlon'));
+  single('Eerste sprinttriatlon', tri(20, 35));
+  single('Eerste kwarttriatlon', tri(40, 65));
+  single('Eerste halve triatlon', tri(100, 125));
+  single('Eerste volledige triatlon', tri(200, 240));
+  for (const n of [100, 250, 500, 1000, 2500, 5000]) total(`${nl(n)} km gelopen`, 'lopen', 'km', n, km, is('lopen'));
+  for (const n of [1000, 2500, 5000, 10000, 25000]) total(`${nl(n)} km gefietst`, 'fietsen', 'km', n, km, is('fietsen'));
+  for (const n of [10, 25, 50, 100, 250]) total(`${n} km gezwommen`, 'zwemmen', 'km', n, km, is('zwemmen'));
+  for (const n of [50, 100, 250, 500, 1000]) total(`${nl(n)} sessies`, 'sessies', 'sessies', n, () => 1);
+  for (const n of [100, 250, 500, 1000]) total(`${nl(n)} uur getraind`, 'uren', 'uur', n, (a) => a.durationS / 3600);
+
+  // Reeksen: weken na elkaar met je weekdoel gehaald. De datum is de zondag van de week waarin je de reeks haalde.
+  const rows = weeks(activities).slice(0, -1);
+  for (const n of [4, 8, 12, 26, 52]) {
+    let run = 0, best = 0, date = null;
+    for (const w of rows) {
+      run = w.sessions >= goal ? run + 1 : 0;
+      best = Math.max(best, run);
+      if (run >= n) { date = addDays(w.week, 6); break; }
+    }
+    out.push({ title: `Reeks van ${n} weken`, date, group: 'reeks', unit: 'weken', done: best, target: n, progress: date ? null : `${best} van ${n} weken` });
+  }
   return out;
 }
 
